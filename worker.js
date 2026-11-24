@@ -3,7 +3,6 @@ const SESSION_SECONDS = 12 * 60 * 60;
 const MAX_BODY_BYTES = 8 * 1024;
 const MAX_URL_LENGTH = 2048;
 const MAX_CODE_LENGTH = 32;
-const CACHE_TTL_SECONDS = 86400;
 const RESERVED_CODES = new Set([
   "admin", "api", "assets", "favicon.ico", "robots.txt", "sitemap.xml"
 ]);
@@ -56,8 +55,10 @@ export default {
           return listLinks(env);
         }
         if (path.startsWith("/admin/api/links/") && request.method === "DELETE") {
-          const code = decodeURIComponent(path.slice("/admin/api/links/".length));
-          return deleteLink(code, env, request, ctx);
+          let code;
+          try { code = decodeURIComponent(path.slice("/admin/api/links/".length)); }
+          catch { return json({ error: "Invalid short code" }, 400); }
+          return deleteLink(code, env);
         }
         return json({ error: "Not found" }, 404);
       }
@@ -65,6 +66,9 @@ export default {
       if (path.length > 1 && !path.slice(1).includes("/")) {
         const code = path.slice(1);
         if (!validCode(code)) return text("Not found", 404);
+        if (request.method !== "GET" && request.method !== "HEAD") {
+          return text("Method Not Allowed", 405, { allow: "GET, HEAD" });
+        }
         return redirectShortLink(request, env, ctx, code);
       }
       return text("Not found", 404);
@@ -127,8 +131,9 @@ async function readJson(request) {
   if (!contentType.toLowerCase().includes("application/json")) {
     return { error: "Content-Type must be application/json" };
   }
-  const declared = Number(request.headers.get("content-length") || 0);
-  if (declared > MAX_BODY_BYTES) return { error: "Request body is too large" };
+  const lengthHeader = request.headers.get("content-length");
+  const declared = lengthHeader === null ? 0 : Number(lengthHeader);
+  if (!Number.isFinite(declared) || declared < 0 || declared > MAX_BODY_BYTES) return { error: "Request body is too large" };
   const raw = await request.text();
   if (new TextEncoder().encode(raw).byteLength > MAX_BODY_BYTES) {
     return { error: "Request body is too large" };
@@ -145,150 +150,145 @@ async function sha256Hex(value) {
 }
 function randomCode(length = 7) {
   const chars = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ";
-  const bytes = crypto.getRandomValues(new Uint8Array(length));
-  return [...bytes].map(b => chars[b % chars.length]).join("");
+  const limit = Math.floor(256 / chars.length) * chars.length;
+  let result = "";
+  while (result.length < length) {
+    const bytes = crypto.getRandomValues(new Uint8Array(16));
+    for (const byte of bytes) {
+      if (byte >= limit) continue;
+      result += chars[byte % chars.length];
+      if (result.length === length) break;
+    }
+  }
+  return result;
 }
 async function createLink(request, env) {
   const body = await readJson(request);
-  if (body.error) return json({ error: body.error }, 400);
-
+  if (!body || typeof body !== "object" || Array.isArray(body) || body.error) {
+    return json({ error: body?.error || "Invalid request body." }, 400);
+  }
   const target = normalizeUrl(body.url);
   if (!target) return json({ error: "Please provide a valid http or https URL (max 2048 characters)." }, 400);
-
   const expiresIn = Number(body.expiresIn ?? 0);
-  if (![0, 86400, 2592000].includes(expiresIn)) {
-    return json({ error: "Invalid expiration option." }, 400);
-  }
+  if (![0, 86400, 2592000].includes(expiresIn)) return json({ error: "Invalid expiration option." }, 400);
+  if (body.customCode != null && typeof body.customCode !== "string") return json({ error: "Custom code must be a string." }, 400);
+  const customCode = (body.customCode || "").trim();
+  if (customCode && !validCode(customCode)) return json({ error: "Custom code must be 3–32 characters: letters, numbers, - or _." }, 400);
 
   const hash = await sha256Hex(target);
   const indexKey = `index:${hash}`;
-  const existingCode = await env.LINKS.get(indexKey);
-  if (existingCode) {
-    const existing = await env.LINKS.get(`link:${existingCode}`, "json");
-    if (existing && (!existing.expiresAt || existing.expiresAt > Date.now())) {
-      return json({ ok: true, code: existingCode, shortUrl: new URL(`/${existingCode}`, request.url).toString(), duplicate: true });
-    }
-    await env.LINKS.delete(indexKey);
-  }
-
-  const customCode = body.customCode == null ? "" : String(body.customCode).trim();
   let code;
-  if (customCode) {
-    if (!validCode(customCode)) return json({ error: "Custom code must be 3–32 characters: letters, numbers, - or _." }, 400);
-    if (await env.LINKS.get(`link:${customCode}`)) {
-      return json({ error: "This short code is already in use." }, 409);
-    }
-    code = customCode;
-  } else {
-    for (let i = 0; i < 8; i++) {
-      const candidate = randomCode();
-      if (!(await env.LINKS.get(`link:${candidate}`))) {
-        code = candidate;
-        break;
+  const indexed = !customCode;
+  // Only auto-generated links use URL de-duplication. Explicit custom codes are honored.
+  if (indexed) {
+    const existingCode = await env.LINKS.get(indexKey, { cacheTtl: 30 });
+    if (existingCode) {
+      const existing = await env.LINKS.get(`link:${existingCode}`, { type: "json", cacheTtl: 30 });
+      if (existing && typeof existing.url === "string" && (!existing.expiresAt || existing.expiresAt > Date.now())) {
+        return json({ ok: true, code: existingCode, shortUrl: new URL(`/${existingCode}`, request.url).toString(), duplicate: true, expiresAt: Number(existing.expiresAt || 0) });
       }
+      await env.LINKS.delete(indexKey);
+    }
+    for (let i = 0; i < 12; i++) {
+      const candidate = randomCode();
+      if (!(await env.LINKS.get(`link:${candidate}`, { cacheTtl: 30 }))) { code = candidate; break; }
     }
     if (!code) return json({ error: "Could not allocate a short code. Please retry." }, 503);
+  } else {
+    code = customCode;
+    if (await env.LINKS.get(`link:${code}`, { cacheTtl: 30 })) return json({ error: "This short code is already in use." }, 409);
   }
 
   const now = Date.now();
   const expiresAt = expiresIn ? now + expiresIn * 1000 : 0;
-  const record = { url: target, createdAt: now, expiresAt };
+  const record = { url: target, createdAt: now, expiresAt, indexed };
   const options = expiresIn ? { expirationTtl: expiresIn } : undefined;
-
-  // KV has no atomic create-if-absent operation. The pre-check prevents normal collisions,
-  // but simultaneous writes to the same custom code can still race.
-  if (await env.LINKS.get(`link:${code}`)) {
-    return json({ error: "This short code is already in use. Choose another." }, 409);
-  }
+  // KV has no atomic create-if-absent operation; simultaneous requests can race.
+  if (await env.LINKS.get(`link:${code}`, { cacheTtl: 30 })) return json({ error: "This short code is already in use. Choose another." }, 409);
   await env.LINKS.put(`link:${code}`, JSON.stringify(record), options);
-  await env.LINKS.put(indexKey, code, options);
-
-  return json({
-    ok: true,
-    code,
-    shortUrl: new URL(`/${code}`, request.url).toString(),
-    duplicate: false,
-    expiresAt
-  }, 201);
+  if (indexed) await env.LINKS.put(indexKey, code, options);
+  return json({ ok: true, code, shortUrl: new URL(`/${code}`, request.url).toString(), duplicate: false, expiresAt }, 201);
 }
 
 async function redirectShortLink(request, env, ctx, code) {
-  const cache = caches.default;
-  const cacheKey = new Request(new URL(`/${code}`, request.url).toString(), { method: "GET" });
-  const cached = await cache.match(cacheKey);
-  if (cached) return cached;
-
-  const key = `link:${code}`;
-  const record = await env.LINKS.get(key, "json");
+  // Do not use Cache API for redirects: its per-datacenter cache can retain
+  // deleted destinations for a long time. Use KV's minimum 30s cache TTL;
+  // KV is still eventually consistent across Cloudflare locations.
+  const record = await env.LINKS.get(`link:${code}`, { type: "json", cacheTtl: 30 });
   if (!record || typeof record.url !== "string") return text("Short link not found", 404);
-
   if (record.expiresAt && record.expiresAt <= Date.now()) {
     ctx.waitUntil(cleanExpiredRecord(env, code, record));
     return text("This short link has expired", 410);
   }
-
   const target = normalizeUrl(record.url);
   if (!target) return text("Invalid link record", 500);
-
-  const remaining = record.expiresAt
-    ? Math.max(1, Math.floor((record.expiresAt - Date.now()) / 1000))
-    : CACHE_TTL_SECONDS;
-  const ttl = Math.max(1, Math.min(CACHE_TTL_SECONDS, remaining));
-  const response = new Response(null, {
-    status: 302,
-    headers: {
-      location: target,
-      "cache-control": `public, max-age=${ttl}`,
-      "x-content-type-options": "nosniff"
-    }
-  });
-  ctx.waitUntil(cache.put(cacheKey, response.clone()));
-  return response;
+  return new Response(null, { status: 302, headers: { location: target, "cache-control": "no-store", "x-content-type-options": "nosniff" } });
 }
+
+async function removeDeDuplicationIndex(env, code, record) {
+  if (!record || typeof record.url !== "string" || record.indexed === false) return;
+  // Old v3.0 records have no `indexed` property; clean their former index too.
+  const hash = await sha256Hex(record.url);
+  const indexKey = `index:${hash}`;
+  const indexedCode = await env.LINKS.get(indexKey, { cacheTtl: 30 });
+  if (!indexedCode || indexedCode === code) {
+    await env.LINKS.delete(indexKey);
+    return;
+  }
+  // Do not remove a valid index that now points to another surviving link.
+  const indexedRecord = await env.LINKS.get(`link:${indexedCode}`, { type: "json", cacheTtl: 30 });
+  if (!indexedRecord || indexedRecord.url !== record.url) await env.LINKS.delete(indexKey);
+}
+
 async function cleanExpiredRecord(env, code, record) {
   await env.LINKS.delete(`link:${code}`);
-  const hash = await sha256Hex(record.url);
-  const indexKey = `index:${hash}`;
-  if (await env.LINKS.get(indexKey) === code) await env.LINKS.delete(indexKey);
+  await removeDeDuplicationIndex(env, code, record);
 }
-async function deleteLink(code, env, request, ctx) {
+
+async function deleteLink(code, env) {
   if (!validCode(code)) return json({ error: "Invalid short code" }, 400);
   const key = `link:${code}`;
-  const record = await env.LINKS.get(key, "json");
-  if (!record) return json({ error: "Link not found" }, 404);
-
-  await env.LINKS.delete(key);
-  const hash = await sha256Hex(record.url);
-  const indexKey = `index:${hash}`;
-  if (await env.LINKS.get(indexKey) === code) await env.LINKS.delete(indexKey);
-
-  // This removes the cache entry in the current Cloudflare data center.
-  // Other data centers may retain their cache entry until its TTL expires.
-  const cacheKey = new Request(new URL(`/${code}`, request.url).toString(), { method: "GET" });
-  ctx.waitUntil(caches.default.delete(cacheKey));
-  return json({ ok: true, deleted: code });
+  const record = await env.LINKS.get(key, { type: "json", cacheTtl: 30 });
+  if (record) {
+    await env.LINKS.delete(key);
+    await removeDeDuplicationIndex(env, code, record);
+  }
+  // If the primary row was already removed manually, scan index keys to repair
+  // an orphaned hash -> code entry. Normal deletes do not incur this scan.
+  let removedIndexes = 0;
+  if (!record) {
+    let cursor;
+    do {
+      const page = await env.LINKS.list({ prefix: "index:", limit: 1000, cursor });
+      for (let i = 0; i < page.keys.length; i += 50) {
+        const batch = page.keys.slice(i, i + 50);
+        const values = await Promise.all(batch.map(item => env.LINKS.get(item.name, { cacheTtl: 30 })));
+        for (let j = 0; j < batch.length; j++) {
+          if (values[j] === code) { await env.LINKS.delete(batch[j].name); removedIndexes++; }
+        }
+      }
+      cursor = page.list_complete ? undefined : page.cursor;
+    } while (cursor);
+  }
+  return json({ ok: true, deleted: code, alreadyMissing: !record, removedOrphanIndexes: removedIndexes });
 }
+
 async function listLinks(env) {
   const output = [];
   let cursor;
   do {
     const page = await env.LINKS.list({ prefix: "link:", limit: 1000, cursor });
-    for (const item of page.keys) {
-      const code = item.name.slice(5);
-      const record = await env.LINKS.get(item.name, "json");
-      if (record && typeof record.url === "string") {
-        output.push({
-          code,
-          url: record.url,
-          createdAt: Number(record.createdAt || 0),
-          expiresAt: Number(record.expiresAt || 0),
-          expired: Boolean(record.expiresAt && record.expiresAt <= Date.now())
-        });
+    for (let i = 0; i < page.keys.length; i += 50) {
+      const batch = page.keys.slice(i, i + 50);
+      const records = await Promise.all(batch.map(item => env.LINKS.get(item.name, { type: "json", cacheTtl: 30 })));
+      for (let j = 0; j < batch.length; j++) {
+        const record = records[j];
+        if (!record || typeof record.url !== "string") continue;
+        output.push({ code: batch[j].name.slice(5), url: record.url, createdAt: Number(record.createdAt || 0), expiresAt: Number(record.expiresAt || 0), expired: Boolean(record.expiresAt && record.expiresAt <= Date.now()) });
       }
     }
     cursor = page.list_complete ? undefined : page.cursor;
   } while (cursor && output.length < 5000);
-
   output.sort((a, b) => b.createdAt - a.createdAt);
   return json({ links: output, truncated: output.length >= 5000 });
 }
@@ -298,7 +298,9 @@ async function login(request, env) {
   if (!loginOrigin || loginOrigin !== new URL(request.url).origin) return json({ error: "Invalid request origin." }, 403);
   if (!env.ADMIN_PASS) return json({ error: "ADMIN_PASS Worker Secret is not configured." }, 500);
   const body = await readJson(request);
-  if (body.error) return json({ error: body.error }, 400);
+  if (!body || typeof body !== "object" || Array.isArray(body) || body.error) {
+    return json({ error: body?.error || "Invalid request body." }, 400);
+  }
   if (typeof body.password !== "string" || body.password.length > 1024) {
     return json({ error: "Invalid credentials." }, 401);
   }
@@ -352,8 +354,9 @@ async function signSession(payload, secret) {
 }
 async function verifySession(token, secret) {
   try {
-    const [data, signature] = token.split(".");
-    if (!data || !signature || token.length > 2048) return null;
+    const parts = token.split(".");
+    if (parts.length !== 2 || !parts[0] || !parts[1] || token.length > 2048) return null;
+    const [data, signature] = parts;
     const key = await crypto.subtle.importKey(
       "raw", new TextEncoder().encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["verify"]
     );
@@ -361,7 +364,10 @@ async function verifySession(token, secret) {
     const valid = await crypto.subtle.verify("HMAC", key, sig, new TextEncoder().encode(data));
     if (!valid) return null;
     const payload = JSON.parse(new TextDecoder().decode(unbase64url(data)));
-    if (!payload || typeof payload.exp !== "number" || typeof payload.csrf !== "string") return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (!payload || typeof payload.iat !== "number" || typeof payload.exp !== "number" ||
+        typeof payload.csrf !== "string" || payload.csrf.length < 20 || payload.iat > now + 60 ||
+        payload.exp <= now || payload.exp <= payload.iat || payload.exp - payload.iat > SESSION_SECONDS) return null;
     return payload;
   } catch {
     return null;
@@ -524,7 +530,7 @@ const status=document.createElement("td"),badge=document.createElement("span");b
 const actions=document.createElement("td"),wrap=document.createElement("div");wrap.className="actions";
 const open=document.createElement("button");open.textContent="打开";open.className="secondary";open.addEventListener("click",()=>window.open("/"+encodeURIComponent(item.code),"_blank","noopener"));
 const copy=document.createElement("button");copy.textContent="复制";copy.className="secondary";copy.addEventListener("click",async()=>{await navigator.clipboard.writeText(location.origin+"/"+item.code);copy.textContent="已复制";});
-const del=document.createElement("button");del.textContent="删除";del.className="danger";del.addEventListener("click",async()=>{if(!confirm("确定删除 /"+item.code+"？"))return;try{await api("/admin/api/links/"+encodeURIComponent(item.code),{method:"DELETE"});await loadLinks();}catch(e){$("#error").textContent=e.message;}});
+const del=document.createElement("button");del.textContent="删除";del.className="danger";del.addEventListener("click",async()=>{if(!confirm("确定删除 /"+item.code+"？"))return;try{await api("/admin/api/links/"+encodeURIComponent(item.code),{method:"DELETE"});links=links.filter(x=>x.code!==item.code);render();$("#error").textContent="已删除。KV 的全球数据同步可能需要短暂时间。";}catch(e){$("#error").textContent=e.message;}});
 wrap.append(open,copy,del);actions.append(wrap);tr.append(actions);tbody.append(tr);}
 $("#count").textContent=arr.length+" 条 · 第 "+(page+1)+"/"+pages+" 页";$("#prev").disabled=page===0;$("#next").disabled=page>=pages-1;}
 ["search","filter","sort"].forEach(id=>$("#"+id).addEventListener(id==="search"?"input":"change",()=>{page=0;render();}));
