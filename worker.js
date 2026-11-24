@@ -454,7 +454,7 @@ const open=document.createElement("button");open.textContent="打开";open.class
 const copy=document.createElement("button");copy.textContent="复制";copy.className="secondary";copy.addEventListener("click",async()=>{await navigator.clipboard.writeText(location.origin+"/"+item.code);copy.textContent="已复制";});
 const del=document.createElement("button");del.textContent="删除";del.className="danger";del.addEventListener("click",async()=>{if(!confirm("确定删除 /"+item.code+"？"))return;try{await api("/admin/api/links/"+encodeURIComponent(item.code),{method:"DELETE"});await loadLinks();}catch(e){$("#error").textContent=e.message;}});
 wrap.append(open,copy,del);actions.append(wrap);tr.append(actions);tbody.append(tr);}
-$("#count").textContent=`${arr.length} 条 · 第 ${page+1}/${pages} 页`;$("#prev").disabled=page===0;$("#next").disabled=page>=pages-1;}
+$("#count").textContent=arr.length+" 条 · 第 "+(page+1)+"/"+pages+" 页";$("#prev").disabled=page===0;$("#next").disabled=page>=pages-1;}
 ["search","filter","sort"].forEach(id=>$("#"+id).addEventListener(id==="search"?"input":"change",()=>{page=0;render();}));
 $("#refresh").addEventListener("click",loadLinks);$("#prev").addEventListener("click",()=>{page=Math.max(0,page-1);render();});$("#next").addEventListener("click",()=>{page++;render();});
 checkSession();
