@@ -388,29 +388,101 @@ function clearSessionCookie() {
 }
 
 const PUBLIC_HTML = String.raw`<!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>短链接</title><style>
-:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#172033;background:#f4f6fa}*{box-sizing:border-box}
-body{margin:0;min-height:100vh;display:grid;place-items:center;padding:22px}.panel{width:min(100%,560px);background:white;border:1px solid #e4e8f0;border-radius:18px;padding:28px;box-shadow:0 12px 40px #1b2b4810}
-h1{margin:0 0 8px;font-size:25px}.muted{color:#64748b;font-size:14px}label{display:block;font-size:14px;font-weight:600;margin:18px 0 7px}
-input,select,button{font:inherit;width:100%;border-radius:10px;padding:12px;border:1px solid #d8deea}input:focus,select:focus{outline:2px solid #9bbcff;border-color:#5b8def}
-button{border:0;background:#245fe8;color:#fff;font-weight:650;margin-top:18px;cursor:pointer}button:disabled{opacity:.6;cursor:wait}
-.result{margin-top:18px;padding:14px;border-radius:10px;background:#f0f5ff;overflow-wrap:anywhere;display:none}.result a{color:#164fc7}.error{color:#b42318;margin-top:12px;font-size:14px}
-.top{display:flex;justify-content:space-between;align-items:center}.top a{font-size:13px;color:#52627b;text-decoration:none}
-</style></head><body><main class="panel"><div class="top"><h1>短链接</h1><a href="/admin">管理后台</a></div>
-<p class="muted">快速创建简洁、可管理的短链接。</p>
-<form id="form"><label for="url">目标网址</label><input id="url" type="url" placeholder="https://example.com/article" required maxlength="2048">
-<label for="custom">自定义短码（可选）</label><input id="custom" placeholder="例如：my-link" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}">
-<label for="expiry">有效期</label><select id="expiry"><option value="0">永久有效</option><option value="86400">1 天</option><option value="2592000">30 天</option></select>
-<button id="submit" type="submit">生成短链接</button></form><div id="error" class="error" role="alert"></div>
-<div id="result" class="result"><strong>短链接已创建</strong><p><a id="short" target="_blank" rel="noopener"></a></p><button type="button" id="copy">复制链接</button></div></main>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="theme-color" content="#101a33">
+<title>Short URL · 智能短链接</title>
+<style>
+:root{color-scheme:light;--ink:#17233b;--muted:#71809a;--line:#e6ebf3;--blue:#4268ed;--blue2:#6b85ff;--bg:#f5f7fc}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif;color:var(--ink);background:radial-gradient(ellipse at 12% 8%,#e6edff 0,transparent 34%),radial-gradient(ellipse at 92% 85%,#e8eaff 0,transparent 30%),var(--bg);display:flex;flex-direction:column}
+header{width:min(1080px,calc(100% - 40px));margin:0 auto;padding:28px 0;display:flex;align-items:center;justify-content:space-between}
+.brand{display:flex;align-items:center;gap:11px;font-weight:800;letter-spacing:.2px}.logo{width:38px;height:38px;border-radius:12px;background:linear-gradient(135deg,#4268ed,#7892ff);display:grid;place-items:center;color:#fff;box-shadow:0 7px 18px #4268ed40}.logo svg{width:21px;height:21px}
+.tag{font-size:12px;color:#52658b;background:#e9efff;border:1px solid #dce5ff;border-radius:99px;padding:7px 11px}
+main{width:min(1080px,calc(100% - 40px));margin:auto;flex:1;display:grid;grid-template-columns:1fr 1fr;align-items:center;gap:54px;padding:30px 0 70px}
+.intro{padding:10px 0}.eyebrow{display:inline-flex;align-items:center;gap:8px;color:#4268ed;font-size:13px;font-weight:750;letter-spacing:1.1px;text-transform:uppercase}.dot{width:7px;height:7px;border-radius:50%;background:#4dca91;box-shadow:0 0 0 4px #4dca9120}
+h1{font-size:clamp(38px,5vw,58px);line-height:1.13;letter-spacing:-1.8px;margin:20px 0 18px;color:#15213b}h1 span{color:#4268ed}.lead{font-size:16px;line-height:1.85;color:#687791;max-width:450px;margin:0}
+.points{display:flex;gap:22px;flex-wrap:wrap;margin-top:34px}.point{display:flex;align-items:center;gap:8px;font-size:13px;color:#52617a}.point svg{width:17px;height:17px;color:#4268ed}
+.panel{background:#fff;border:1px solid #e7ebf3;border-radius:22px;padding:30px;box-shadow:0 24px 70px #263d7012,0 3px 10px #263d7008}
+.panel-head{margin-bottom:22px}.panel-head h2{font-size:20px;margin:0 0 7px}.panel-head p{font-size:13px;color:var(--muted);margin:0}
+label{display:block;font-size:13px;font-weight:700;color:#35445e;margin:18px 0 8px}
+.field{position:relative}.field input,.field select{width:100%;height:48px;border:1px solid #dfe5ef;border-radius:11px;background:#fbfcff;padding:0 14px;font:inherit;font-size:14px;color:#263650;outline:none;transition:border .18s,box-shadow .18s}.field input:focus,.field select:focus{border-color:#7892ff;box-shadow:0 0 0 4px #4268ed16;background:#fff}.field input::placeholder{color:#a3aec0}
+.hint{font-size:11px;color:#98a3b5;margin:7px 2px 0}
+.submit{width:100%;height:50px;margin-top:23px;border:0;border-radius:11px;background:linear-gradient(100deg,#4268ed,#647fff);color:white;font-size:15px;font-weight:750;cursor:pointer;box-shadow:0 9px 20px #4268ed30;transition:transform .15s,box-shadow .15s}.submit:hover{transform:translateY(-1px);box-shadow:0 12px 24px #4268ed3b}.submit:disabled{opacity:.65;cursor:wait;transform:none}
+.error{font-size:13px;color:#bd3434;margin-top:12px;min-height:18px}
+.result{display:none;margin-top:18px;border:1px solid #dce6ff;background:#f4f7ff;border-radius:13px;padding:15px}.result-title{font-size:13px;font-weight:750;color:#284aaf;display:flex;align-items:center;gap:7px}.result-link{display:block;margin:10px 0 13px;color:#315bd2;font-size:14px;overflow-wrap:anywhere;text-decoration:none}.result-actions{display:flex;gap:9px}.result-actions button{flex:1;height:39px;border-radius:9px;border:1px solid #d7e1fb;background:#fff;color:#3156b5;font-weight:700;cursor:pointer}.result-actions button.primary{background:#4268ed;color:#fff;border-color:#4268ed}
+footer{padding:20px;text-align:center;color:#9aa5b7;font-size:12px}
+@media(max-width:800px){main{grid-template-columns:1fr;gap:28px;max-width:560px;padding:28px 0 48px}.intro{text-align:center}.lead{margin:auto}.points{justify-content:center;margin-top:22px}h1{font-size:42px}.panel{padding:24px}}
+@media(max-width:420px){header,main{width:calc(100% - 28px)}header{padding:18px 0}.tag{font-size:11px}.panel{padding:20px;border-radius:18px}h1{font-size:36px}.points{gap:13px}}
+</style>
+</head>
+<body>
+<header>
+  <div class="brand"><span class="logo"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M10 13a5 5 0 0 0 7.07 0l3-3A5 5 0 0 0 13 2.93l-1.72 1.72"/><path d="M14 11a5 5 0 0 0-7.07 0l-3 3A5 5 0 0 0 11 21.07l1.72-1.72"/></svg></span>SHORT URL</div>
+  <span class="tag">轻量 · 快速 · 简洁</span>
+</header>
+<main>
+  <section class="intro">
+    <div class="eyebrow"><span class="dot"></span> SIMPLE LINK. SMART SHARING.</div>
+    <h1>让每一个链接<br><span>短一点，简单一点。</span></h1>
+    <p class="lead">把冗长的网址转换成简洁短链接。支持自定义短码和有效期设置，生成后即可复制分享。</p>
+    <div class="points">
+      <div class="point"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>一键生成</div>
+      <div class="point"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>自定义短码</div>
+      <div class="point"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="m5 12 4 4L19 6"/></svg>灵活设置有效期</div>
+    </div>
+  </section>
+  <section class="panel">
+    <div class="panel-head"><h2>创建短链接</h2><p>输入目标网址，几秒钟即可完成转换。</p></div>
+    <form id="form">
+      <label for="url">目标网址</label>
+      <div class="field"><input id="url" type="url" placeholder="https://example.com/article" required maxlength="2048" autocomplete="url"></div>
+      <label for="custom">自定义短码 <span style="font-weight:400;color:#98a3b5">· 可选</span></label>
+      <div class="field"><input id="custom" placeholder="例如：my-link" maxlength="32" pattern="[A-Za-z0-9_-]{3,32}" autocomplete="off"></div>
+      <p class="hint">3–32 位，仅支持英文字母、数字、连字符和下划线。</p>
+      <label for="expiry">链接有效期</label>
+      <div class="field"><select id="expiry"><option value="0">永久有效</option><option value="86400">1 天</option><option value="2592000">30 天</option></select></div>
+      <button class="submit" id="submit" type="submit">生成短链接&nbsp; →</button>
+    </form>
+    <div id="error" class="error" role="alert" aria-live="polite"></div>
+    <div id="result" class="result" aria-live="polite">
+      <div class="result-title">✓ 短链接创建成功</div>
+      <a id="short" class="result-link" target="_blank" rel="noopener"></a>
+      <div class="result-actions"><button class="primary" type="button" id="copy">复制链接</button><button type="button" id="again">继续创建</button></div>
+    </div>
+  </section>
+</main>
+<footer>SHORT URL · 简单可靠的链接分享工具</footer>
 <script>
-const form=document.querySelector("#form"),btn=document.querySelector("#submit"),err=document.querySelector("#error"),result=document.querySelector("#result"),short=document.querySelector("#short");
-form.addEventListener("submit",async e=>{e.preventDefault();err.textContent="";result.style.display="none";btn.disabled=true;
-try{const r=await fetch("/api/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:document.querySelector("#url").value,customCode:document.querySelector("#custom").value,expiresIn:Number(document.querySelector("#expiry").value)})});const d=await r.json();if(!r.ok)throw new Error(d.error||"创建失败");short.href=d.shortUrl;short.textContent=d.shortUrl;result.style.display="block";}catch(e){err.textContent=e.message;}finally{btn.disabled=false;}});
-document.querySelector("#copy").addEventListener("click",async()=>{try{await navigator.clipboard.writeText(short.href);document.querySelector("#copy").textContent="已复制";}catch{err.textContent="复制失败，请手动复制链接";}});
-</script></body></html>`;
-
+const form=document.querySelector("#form");
+const btn=document.querySelector("#submit");
+const err=document.querySelector("#error");
+const result=document.querySelector("#result");
+const short=document.querySelector("#short");
+const copy=document.querySelector("#copy");
+form.addEventListener("submit",async function(e){
+  e.preventDefault();err.textContent="";result.style.display="none";btn.disabled=true;btn.textContent="正在生成…";
+  try{
+    const response=await fetch("/api/create",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({url:document.querySelector("#url").value.trim(),customCode:document.querySelector("#custom").value.trim(),expiresIn:Number(document.querySelector("#expiry").value)})});
+    const data=await response.json();
+    if(!response.ok)throw new Error(data.error||"创建失败，请稍后重试。");
+    short.href=data.shortUrl;short.textContent=data.shortUrl;
+    result.style.display="block";copy.textContent="复制链接";
+  }catch(error){err.textContent=error.message||"创建失败，请稍后重试。";}
+  finally{btn.disabled=false;btn.textContent="生成短链接　→";}
+});
+copy.addEventListener("click",async function(){
+  try{await navigator.clipboard.writeText(short.href);copy.textContent="已复制 ✓";}
+  catch(error){err.textContent="复制失败，请点击短链接后手动复制。";}
+});
+document.querySelector("#again").addEventListener("click",function(){
+  result.style.display="none";document.querySelector("#url").focus();
+});
+</script>
+</body>
+</html>`;
 const ADMIN_HTML = String.raw`<!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>短链接管理</title><style>
